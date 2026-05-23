@@ -1,0 +1,112 @@
+# 1. Cài đặt MongoDB
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      containers:
+      - name: mongodb
+        image: mongo:latest
+        resources:
+          requests:
+            cpu: "100m"    # Báo cho K8s biết Mongo cần ít nhất 100m CPU
+          limits:
+            cpu: "500m"    # Giới hạn tối đa 500m CPU
+---
+# 2. Tạo dịch vụ mạng cho MongoDB
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo
+spec:
+  ports:
+  - port: 27017
+  selector:
+    app: mongodb
+---
+# 3. Cài đặt API Flash Sale của bạn
+# 3. Cài đặt API Flash Sale của bạn
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flash-sale-app
+spec:
+  replicas: 3 # Tạo đúng 3 bản sao cho 3 Node
+  selector:
+    matchLabels:
+      app: flash-sale-app
+  template:
+    metadata:
+      labels:
+        app: flash-sale-app
+    spec:
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: flash-sale-app
+      containers:
+      - name: app
+        image: flash-sale-app:latest
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "256Mi"
+        ports:
+        - containerPort: 8000
+---
+# 4. Tạo dịch vụ mạng để bạn truy cập được API
+apiVersion: v1
+kind: Service
+metadata:
+  name: flash-sale-service
+spec:
+  type: NodePort
+  ports:
+  - port: 8000
+    targetPort: 8000
+    nodePort: 30000
+  selector:
+    app: flash-sale-app
+---
+# 5. Cài đặt Tự động mở rộng (HPA) cho Cơ sở dữ liệu
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: flash-sale-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: flash-sale-app
+  minReplicas: 3
+  maxReplicas: 8
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 50 # Khi CPU trung bình > 50%, HPA sẽ tạo thêm pod app mới
+  behavior:
+      scaleDown:
+        stabilizationWindowSeconds: 60 # Giữ pod ổn định lâu hơn để video dễ quan sát
+        policies:
+        - type: Percent
+          value: 100                   # Cho phép xóa tối đa 100% số pod thừa cùng lúc
+          periodSeconds: 30
