@@ -152,71 +152,152 @@ Kết quả mong đợi ban đầu:
 - `flash-sale-hpa` xuất hiện trong `kubectl get hpa`
 - `kubectl top pods` trả về số liệu CPU/memory
 
-## Kịch bản quay video phần 5: HPA + Self-healing
+## Kịch bản quay video: HPA + Self-healing
 
-### A. Chứng minh scale up khi bùng nổ request
+### Mục tiêu video
 
-1. Mở port-forward:
+1. Chứng minh ứng dụng đang chạy bình thường trên Kubernetes nhiều node.
+2. Chứng minh HPA tự scale up khi có nhiều request.
+3. Chứng minh hệ thống vẫn phục vụ được khi một worker node bị tắt.
+
+### Bước 0: Khôi phục cluster nếu đang bị tắt
+
+Nếu `kubectl` đang không kết nối được, chạy trước:
+
+```powershell
+minikube start -p minikube
+minikube update-context -p minikube
+kubectl get nodes -o wide
+```
+
+Chỉ bắt đầu quay khi cả 3 node đều `Ready`.
+
+### Bước 1: Mở 4 terminal để quay cho rõ
+
+Terminal 1:
+
+```powershell
+kubectl get hpa flash-sale-hpa -w
+```
+
+Terminal 2:
+
+```powershell
+kubectl get pods -l app=flash-sale-app -o wide -w
+```
+
+Terminal 3:
+
+```powershell
+kubectl get nodes -w
+```
+
+Terminal 4:
 
 ```powershell
 kubectl port-forward svc/flash-sale-service 8000:8000
 ```
 
-2. Mở terminal khác và bắn tải bằng Locust:
+Mở tiếp trình duyệt và vào:
 
-```powershell
-locust -f locustfile.py --headless -u 500 -r 100 --run-time 2m --host=http://127.0.0.1:8000
+```text
+http://127.0.0.1:8089
 ```
 
-Nếu cần tăng tổng số request để tiến gần ngưỡng 50.000 request, hãy tăng `--run-time` hoặc số user (`-u`) tùy cấu hình máy cho đến khi tổng request đạt mức mong muốn.
+Đây là giao diện web của Locust, dùng để nhập số user, spawn rate và theo dõi kết quả trực quan.
 
-3. Theo dõi HPA và pod:
+### Bước 2: Quay cảnh hệ thống đang ổn định
+
+Quay 5-10 giây cảnh:
+
+```powershell
+kubectl get nodes -o wide
+kubectl get pods -l app=flash-sale-app -o wide
+kubectl get hpa flash-sale-hpa
+```
+
+Câu nói mẫu:
+
+“Ban đầu hệ thống đang chạy với 3 pod, HPA sẵn sàng scale khi tải tăng.”
+
+### Bước 3: Bắn tải để HPA scale up
+
+Mở terminal thứ 5 và chạy Locust ở chế độ giao diện:
+
+```powershell
+locust -f locustfile.py --host=http://127.0.0.1:8000
+```
+
+Sau đó mở trình duyệt tại `http://127.0.0.1:8089`, nhập:
+
+- Host: `http://127.0.0.1:8000`
+- Number of users: `500`
+- Spawn rate: `100`
+- Run time: để trống nếu muốn bấm Start thủ công, hoặc dùng nút Start trực tiếp trên UI
+
+Nếu máy yếu hoặc CPU chưa tăng đủ, tăng lên `800` users và `150` spawn rate.
+
+Trong lúc Locust chạy, quay đồng thời:
 
 ```powershell
 kubectl get hpa flash-sale-hpa -w
 kubectl get pods -l app=flash-sale-app -w
 ```
 
-Khi CPU tăng, HPA sẽ scale từ 3 replicas lên tối đa 8 replicas.
+Chờ đến khi replicas tăng từ 3 lên cao hơn, tốt nhất là thấy rõ số pod tăng dần.
 
-Trong video, nên quay đồng thời:
+Câu nói mẫu:
 
-- `kubectl get hpa flash-sale-hpa -w`
-- `kubectl get pods -l app=flash-sale-app -w`
-- màn hình Locust hiển thị request rate tăng lên
+“Khi lượng request tăng, CPU trung bình vượt ngưỡng 50%, HPA tự động tạo thêm pod.”
 
-### B. Chứng minh tự khắc phục khi một node bị sập
+### Bước 4: Tắt 1 worker node để mô phỏng sự cố
 
-Sau khi HPA đã scale up và pod đang chạy ổn, tắt một worker node:
+Sau khi đã quay rõ phần scale up, chạy:
 
 ```powershell
 minikube node stop minikube-m02
 ```
 
-Theo dõi tiếp:
+Tiếp tục quay `kubectl get nodes -w` và `kubectl get pods -l app=flash-sale-app -o wide -w`.
+
+Điểm cần chờ để quay:
+
+1. Node `minikube-m02` chuyển sang `NotReady`.
+2. Pod nằm trên node đó bị `Terminating` hoặc được tạo lại trên node còn sống.
+3. Dịch vụ vẫn phản hồi bình thường qua `port-forward`.
+
+Nếu node chuyển trạng thái chậm, bạn có thể xóa thêm 1 pod đang nằm trên node lỗi để cảnh reschedule xuất hiện nhanh hơn:
 
 ```powershell
-kubectl get nodes -w
-kubectl get pods -l app=flash-sale-app -w
+kubectl delete pod <pod-name>
 ```
 
-Kubernetes sẽ đánh dấu node là `NotReady` sau một thời gian ngắn và các pod trên node đó sẽ bị thay thế/reschedule sang node còn sống.
+Câu nói mẫu:
 
-Nếu muốn cảnh self-healing xuất hiện rõ hơn trong video ngắn, có thể kết hợp thêm việc xóa một pod đang chạy trên node vừa bị tắt để Kubernetes tạo lại pod mới nhanh hơn.
+“Tôi tắt một worker node để mô phỏng lỗi hạ tầng, nhưng Kubernetes vẫn giữ dịch vụ chạy bằng cách điều phối lại pod sang node còn sống.”
 
-## Gợi ý kịch bản nói trong video
+### Bước 5: Chốt video
 
-- “Đây là hệ thống flash sale mô phỏng trên Kubernetes.”
-- “Khi lượng request tăng đột biến, HPA dựa vào CPU sẽ tự tăng số lượng pod.”
-- “Sau đây tôi tắt một worker node để kiểm tra self-healing.”
-- “Kubernetes phát hiện node lỗi, giữ dịch vụ tiếp tục chạy và tự bố trí lại workload trên các node còn sống.”
+Quay thêm 10-15 giây ở trạng thái cuối để thấy:
 
-## Kết quả cần chứng minh khi nộp bài
+```powershell
+kubectl get nodes -o wide
+kubectl get pods -l app=flash-sale-app -o wide
+kubectl get hpa flash-sale-hpa
+```
 
-- Hệ thống triển khai thành công trên Kubernetes đa node.
-- HPA tự tăng số lượng pod khi tải tăng đột biến.
-- Khi worker node bị tắt, hệ thống vẫn duy trì dịch vụ trên các node còn sống.
-- README cung cấp đủ lệnh để người chấm có thể chạy lại toàn bộ quy trình.
+Chốt bằng một câu ngắn:
+
+“Hệ thống đã chứng minh được auto-scaling và self-healing trên Kubernetes.”
+
+### Checklist phải có trong video
+
+1. Có cảnh ban đầu 3 node và 3 pod đang chạy.
+2. Có cảnh Locust bắn tải vào API.
+3. Có cảnh HPA tăng replicas.
+4. Có cảnh tắt một worker node.
+5. Có cảnh node chuyển `NotReady` và pod được thay thế.
+6. Có cảnh ứng dụng vẫn phản hồi sau sự cố.
 
 ## Kiểm tra trạng thái hiện tại
 
@@ -240,6 +321,22 @@ minikube delete -p minikube
 - `flash-sale-app` cần image `flash-sale-app:latest` có sẵn trong Minikube.
 - Nếu muốn demo self-healing rõ hơn trong video ngắn, nên quay 2 pha riêng: một pha scale up và một pha tắt worker node.
 - Không commit file `flash-sale-app.tar` hoặc thư mục `__pycache__` lên repository.
+
+
+## Xử lý nhanh khi `kubectl` báo không kết nối được
+
+Nếu `kubectl` báo lỗi kiểu `dial tcp 127.0.0.1:xxxxx: connectex: No connection could be made`, nguyên nhân thường là Minikube đang bị `Stopped` hoặc kubeconfig đang trỏ vào API server cũ.
+
+Chạy lần lượt:
+
+```powershell
+minikube status -p minikube
+minikube start -p minikube
+minikube update-context -p minikube
+kubectl get nodes -o wide
+```
+
+Nếu `minikube start` mất thời gian ở bước pull image, cứ để nó chạy xong rồi kiểm tra lại `kubectl get nodes`. Chỉ nên quay video khi cả 3 node đã lên và `kubectl` hoạt động bình thường.
 
 ## Tác giả / Mục đích
 
